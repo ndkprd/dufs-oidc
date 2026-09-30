@@ -1,0 +1,55 @@
+# Example dufs config for the ASDP fork: OIDC login + api_keys.
+# Run: dufs --config config.example.yaml
+# Replace every CHANGE-ME value. Do not commit real secrets.
+
+serve-path: .
+bind: 0.0.0.0
+port: 5000
+
+# Legacy rule list, unchanged from upstream dufs (user:pass@/path:perm).
+# This is NOT the place for api_keys or oidc; those are separate top-level blocks.
+auth: []
+
+# OpenID Connect login for browsers (authorization code + PKCE S256).
+oidc:
+  enabled: true
+  # Issuer URL; /.well-known/openid-configuration is fetched lazily from here.
+  issuer: http://localhost:8080/realms/asdp
+  client_id: dufs
+  client_secret: CHANGE-ME-client-secret
+  # Must be registered in the IdP exactly as written. https makes the cookie Secure.
+  redirect_url: http://localhost:5000/oidc/callback
+  # Default: [openid, profile, email]. Add scopes your claims need.
+  scopes: [openid, profile, email]
+  # At least 32 bytes. Signs session and download-token cookies.
+  # Changing it logs everyone out. Generate: openssl rand -base64 48
+  session_secret: CHANGE-ME-at-least-32-bytes-long-random-string
+  # Seconds, or a number with s|m|h|d suffix. Default 8h.
+  session_ttl: 8h
+  # Claim used as the display/user name. Falls back to email, then sub.
+  user_claim: preferred_username
+  # Evaluated on every request. Matching rules are merged (widest permission wins).
+  rules:
+    - claim: groups          # dotted path into the ID token, e.g. realm_access.roles
+      contains: /devops      # array element or exact string; Keycloak keeps the leading /
+      paths: ["/releases:rw", "/docs:ro"]
+    - claim: email
+      equals: ops@example.com
+      paths: ["/:rw"]
+  # Applies to logged-in users that match no rule. Empty (default) means 403.
+  default_paths: ["/docs:ro"]
+
+# Named machine credentials. Basic (name:token) or Bearer (token).
+api_keys:
+  # Plain token: simple, but stored readable in this file (startup warns).
+  - name: ci-plain
+    token: CHANGE-ME-plain-token
+    paths: ["/releases:rw"]
+  # SHA-256 of the token: printf %s "$TOKEN" | sha256sum | cut -d' ' -f1
+  - name: ci-sha256
+    token: "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+    paths: ["/releases:ro"]
+  # SHA-512 crypt: openssl passwd -6 "$TOKEN". Basic auth only, Bearer is rejected.
+  - name: ci-crypt
+    token: "$6$CHANGE-ME-salt$CHANGE-ME-hash"
+    paths: ["/releases:rw"]
