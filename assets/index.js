@@ -16,7 +16,7 @@
  * @property {boolean} allow_delete
  * @property {boolean} allow_search
  * @property {boolean} allow_archive
-* @property {boolean} oidc
+ * @property {boolean} oidc
  * @property {boolean} auth
  * @property {string} user
  * @property {boolean} dir_exists
