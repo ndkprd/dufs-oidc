@@ -4,6 +4,8 @@ mod http_logger;
 mod http_utils;
 mod logger;
 mod noscript;
+#[cfg(feature = "oidc")]
+mod oidc;
 mod server;
 mod utils;
 

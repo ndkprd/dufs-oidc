@@ -54,10 +54,16 @@ pin-project-lite = "0.2"
 sha2 = "0.11.0"
 ed25519-dalek = "2.2.0"
 hex = "0.4.3"
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+jsonwebtoken = { version = "10", optional = true, default-features = false, features = ["rust_crypto"] }
+hmac = { version = "0.13", optional = true }
+rand = { version = "0.10", optional = true }
 
 [features]
-default = ["tls"]
+default = ["tls", "oidc"]
 tls = ["tokio-rustls"]
+oidc = ["dep:reqwest", "dep:rustls", "dep:jsonwebtoken", "dep:hmac", "dep:rand"]
 
 [dev-dependencies]
 assert_cmd = "2"
