@@ -595,10 +595,6 @@ impl AccessPerm {
 }
 
 pub fn www_authenticate(res: &mut Response, args: &Args) -> Result<()> {
-    if !args.auth.api_keys.is_empty() {
-        let bearer = HeaderValue::from_str(&format!("Bearer realm=\"{REALM}\""))?;
-        res.headers_mut().append(WWW_AUTHENTICATE, bearer);
-    }
     if args.auth.use_hashed_password || args.auth.users.is_empty() {
         let basic = HeaderValue::from_str(&format!("Basic realm=\"{REALM}\""))?;
         res.headers_mut().insert(WWW_AUTHENTICATE, basic);
@@ -610,6 +606,10 @@ pub fn www_authenticate(res: &mut Response, args: &Args) -> Result<()> {
         let basic = HeaderValue::from_str(&format!("Basic realm=\"{REALM}\""))?;
         res.headers_mut().append(WWW_AUTHENTICATE, digest);
         res.headers_mut().append(WWW_AUTHENTICATE, basic);
+    }
+    if !args.auth.api_keys.is_empty() {
+        let bearer = HeaderValue::from_str(&format!("Bearer realm=\"{REALM}\""))?;
+        res.headers_mut().append(WWW_AUTHENTICATE, bearer);
     }
     Ok(())
 }

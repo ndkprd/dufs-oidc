@@ -1,6 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
-use crate::auth::{www_authenticate, AccessPaths, AccessPerm};
+use crate::auth::{www_authenticate, AccessPaths, AccessPerm, OidcIdentity};
+#[cfg(feature = "oidc")]
+use crate::oidc::{OidcClient, OidcError};
 use crate::http_utils::{body_full, IncomingStream, LengthLimitedStream};
 use crate::noscript::{detect_noscript, generate_noscript_html};
 use crate::utils::{decode_uri, encode_uri, get_file_name, glob, parse_range, try_get_file_name};
@@ -22,8 +24,8 @@ use hyper::body::Frame;
 use hyper::{
     body::Incoming,
     header::{
-        HeaderValue, AUTHORIZATION, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-        CONTENT_TYPE, RANGE,
+        HeaderValue, ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH,
+        CONTENT_RANGE, CONTENT_TYPE, COOKIE, LOCATION, RANGE, SET_COOKIE,
     },
     Method, StatusCode, Uri,
 };
@@ -48,6 +50,10 @@ use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
 use xml::escape::escape_str_pcdata;
 
+/// Name of the authenticated user, attached to responses so the access log can show it.
+#[derive(Clone)]
+struct LogUser(String);
+
 pub type Request = hyper::Request<Incoming>;
 pub type Response = hyper::Response<BoxBody<Bytes, anyhow::Error>>;
 
@@ -59,6 +65,7 @@ const INDEX_NAME: &str = "index.html";
 const BUF_SIZE: usize = 65536;
 const EDITABLE_TEXT_MAX_SIZE: u64 = 4194304; // 4M
 const RESUMABLE_UPLOAD_MIN_SIZE: u64 = 20971520; // 20M
+const OIDC_ROUTE: &str = "oidc";
 const HEALTH_CHECK_PATH: &str = "__dufs__/health";
 pub const MAX_SUBPATHS_COUNT: u64 = 1000;
 
@@ -68,6 +75,8 @@ pub struct Server {
     html: Cow<'static, str>,
     single_file_req_paths: Vec<String>,
     running: Arc<AtomicBool>,
+    #[cfg(feature = "oidc")]
+    oidc: Option<OidcClient>,
 }
 
 impl Server {
@@ -86,6 +95,18 @@ impl Server {
         } else {
             vec![]
         };
+        #[cfg(feature = "oidc")]
+        let oidc = args.auth.oidc_enabled().then(|| {
+            let wanted = args.auth.oidc_wanted_claims();
+            OidcClient::new(&args.oidc, wanted, &args.uri_prefix)
+        });
+        #[cfg(not(feature = "oidc"))]
+        if args.auth.oidc_enabled() {
+            anyhow::bail!("oidc is enabled in the config but this build lacks the `oidc` feature");
+        }
+        if args.auth.oidc_enabled() && args.serve_path.join(OIDC_ROUTE).exists() {
+            warn!("`{OIDC_ROUTE}` at the top level of the served path is reserved for login and will be hidden");
+        }
         let html = match args.assets.as_ref() {
             Some(path) => Cow::Owned(std::fs::read_to_string(path.join("index.html"))?),
             None => Cow::Borrowed(INDEX_HTML),
@@ -96,6 +117,8 @@ impl Server {
             single_file_req_paths,
             assets_prefix,
             html,
+            #[cfg(feature = "oidc")]
+            oidc,
         })
     }
 
@@ -115,6 +138,9 @@ impl Server {
         let mut res = match self.clone().handle(req).await {
             Ok(res) => {
                 http_log_data.insert("status".to_string(), res.status().as_u16().to_string());
+                if let Some(LogUser(user)) = res.extensions().get::<LogUser>() {
+                    http_log_data.insert("remote_user".to_string(), user.clone());
+                }
                 if !uri.path().starts_with(assets_prefix) {
                     self.args.http_logger.log(&http_log_data, None);
                 }
@@ -153,6 +179,12 @@ impl Server {
             }
         };
 
+        if let Some(route) = self.oidc_route(&relative_path) {
+            self.handle_oidc(route, &method, req.uri().query(), headers, &mut res)
+                .await;
+            return Ok(res);
+        }
+
         if method == Method::GET
             && self
                 .handle_internal(&relative_path, headers, &mut res)
@@ -182,18 +214,22 @@ impl Server {
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
 
+        let identity = self.oidc_identity(headers);
         let guard = self.args.auth.guard(
             &relative_path,
             &method,
             authorization,
             query_params.get("token"),
             is_microsoft_webdav,
-            None,
+            identity.as_ref(),
         );
 
         let (user, access_paths) = match guard {
             (None, None) => {
-                self.auth_reject(&mut res)?;
+                match self.login_redirect_location(&method, headers, req.uri()) {
+                    Some(location) => redirect(&mut res, &location, &[]),
+                    None => self.auth_reject(&mut res)?,
+                }
                 return Ok(res);
             }
             (Some(_), None) => {
@@ -202,6 +238,9 @@ impl Server {
             }
             (x, Some(y)) => (x, y),
         };
+        if let Some(user) = user.clone() {
+            res.extensions_mut().insert(LogUser(user));
+        }
 
         if detect_noscript(&user_agent) {
             query_params.insert("noscript".to_string(), String::new());
@@ -227,7 +266,8 @@ impl Server {
         }
 
         if has_query_flag(&query_params, "tokengen") {
-            self.handle_tokengen(&relative_path, user, &mut res).await?;
+            self.handle_tokengen(&relative_path, user, identity.as_ref(), &mut res)
+                .await?;
             return Ok(res);
         }
 
@@ -630,6 +670,7 @@ impl Server {
                 hidden,
                 self.args.allow_symlink,
                 self.args.serve_path.clone(),
+                self.args.auth.oidc_enabled(),
                 move |x| get_file_name(x.path()).to_lowercase().contains(&search),
             ))
             .await?;
@@ -673,6 +714,7 @@ impl Server {
         let compression = self.args.compress.to_compression();
         let follow_symlinks = self.args.allow_symlink;
         let serve_path = self.args.serve_path.clone();
+        let reserve_oidc = self.args.auth.oidc_enabled();
         tokio::spawn(async move {
             if let Err(e) = zip_dir(
                 &mut writer,
@@ -682,6 +724,7 @@ impl Server {
                 compression,
                 follow_symlinks,
                 serve_path,
+                reserve_oidc,
                 running,
             )
             .await
@@ -1030,6 +1073,7 @@ impl Server {
             allow_upload: self.args.allow_upload,
             allow_delete: self.args.allow_delete,
             auth: self.args.auth.has_users(),
+            oidc: self.args.auth.oidc_enabled(),
             user,
             editable,
         };
@@ -1076,12 +1120,13 @@ impl Server {
         &self,
         relative_path: &str,
         user: Option<String>,
+        identity: Option<&OidcIdentity>,
         res: &mut Response,
     ) -> Result<()> {
         let output = self
             .args
             .auth
-            .generate_token(relative_path, &user.unwrap_or_default(), None)?;
+            .generate_token(relative_path, &user.unwrap_or_default(), identity)?;
         res.headers_mut()
             .typed_insert(ContentType::from(mime_guess::mime::TEXT_PLAIN_UTF_8));
         res.headers_mut()
@@ -1305,6 +1350,7 @@ impl Server {
             allow_archive: self.args.allow_archive,
             dir_exists: exist,
             auth: self.args.auth.has_users(),
+            oidc: self.args.auth.oidc_enabled(),
             user,
             paths,
         };
@@ -1341,6 +1387,108 @@ impl Server {
         }
         *res.body_mut() = body_full(output);
         Ok(())
+    }
+
+    /// True for the top-level `oidc` name while OIDC login owns that route.
+    fn is_reserved_route(&self, relative_path: &str) -> bool {
+        self.args.auth.oidc_enabled() && self.oidc_route(relative_path).is_some()
+    }
+
+    /// `login`, `callback`, ... for `oidc/login`, `oidc/callback`, ...; `None` if not under `oidc`.
+    fn oidc_route<'a>(&self, relative_path: &'a str) -> Option<&'a str> {
+        if !self.args.auth.oidc_enabled() {
+            return None;
+        }
+        match relative_path.strip_prefix(OIDC_ROUTE) {
+            Some("") => Some(""),
+            Some(rest) => rest.strip_prefix('/'),
+            None => None,
+        }
+    }
+
+    fn is_reserved_entry(&self, entry_path: &Path) -> bool {
+        self.args.auth.oidc_enabled()
+            && entry_path.parent() == Some(self.args.serve_path.as_path())
+            && get_file_name(entry_path) == OIDC_ROUTE
+    }
+
+    fn oidc_identity(&self, headers: &HeaderMap<HeaderValue>) -> Option<OidcIdentity> {
+        #[cfg(feature = "oidc")]
+        {
+            let cookie = headers.get(COOKIE).and_then(|v| v.to_str().ok());
+            self.oidc.as_ref()?.identity(cookie)
+        }
+        #[cfg(not(feature = "oidc"))]
+        {
+            let _ = headers;
+            None
+        }
+    }
+
+    /// Where to send an unauthenticated browser page load, if OIDC login applies.
+    fn login_redirect_location(
+        &self,
+        method: &Method,
+        headers: &HeaderMap<HeaderValue>,
+        uri: &Uri,
+    ) -> Option<String> {
+        let wants_html = headers
+            .get(ACCEPT)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("text/html"));
+        if !self.args.auth.oidc_enabled() || method != Method::GET || !wants_html {
+            return None;
+        }
+        let back = uri.path_and_query()?.as_str();
+        Some(format!(
+            "{}{OIDC_ROUTE}/login?return={}",
+            self.args.uri_prefix,
+            urlencoding::encode(back)
+        ))
+    }
+
+    async fn handle_oidc(
+        &self,
+        route: &str,
+        method: &Method,
+        query: Option<&str>,
+        headers: &HeaderMap<HeaderValue>,
+        res: &mut Response,
+    ) {
+        #[cfg(feature = "oidc")]
+        {
+            let Some(client) = self.oidc.as_ref() else {
+                return status_not_found(res);
+            };
+            let query: HashMap<String, String> =
+                form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect();
+            let cookie = headers.get(COOKIE).and_then(|v| v.to_str().ok());
+            let is_get = method == Method::GET;
+            match route {
+                "login" if is_get => {
+                    let back = query.get("return").map(String::as_str).unwrap_or_default();
+                    match client.login(back).await {
+                        Ok(out) => redirect(res, &out.location, &[out.set_cookie]),
+                        Err(err) => oidc_error(res, err),
+                    }
+                }
+                "callback" if is_get => match client.callback(&query, cookie).await {
+                    Ok(out) => redirect(res, &out.return_path, &out.set_cookies),
+                    Err(err) => oidc_error(res, err),
+                },
+                "logout" if is_get || method == Method::POST => {
+                    redirect(res, &self.args.uri_prefix, &client.logout_cookies())
+                }
+                _ => status_not_found(res),
+            }
+        }
+        #[cfg(not(feature = "oidc"))]
+        {
+            let _ = (route, method, query, headers);
+            status_not_found(res);
+        }
     }
 
     fn auth_reject(&self, res: &mut Response) -> Result<()> {
@@ -1386,11 +1534,21 @@ impl Server {
             }
         };
 
+        if self.is_reserved_route(&dest_path) {
+            status_forbid(res);
+            return None;
+        }
+
         let authorization = headers.get(AUTHORIZATION);
-        let guard = self
-            .args
-            .auth
-            .guard(&dest_path, req.method(), authorization, None, false, None);
+        let identity = self.oidc_identity(headers);
+        let guard = self.args.auth.guard(
+            &dest_path,
+            req.method(),
+            authorization,
+            None,
+            false,
+            identity.as_ref(),
+        );
 
         match guard {
             (_, Some(_)) => {}
@@ -1484,6 +1642,9 @@ impl Server {
 
     async fn add_pathitem(&self, paths: &mut Vec<PathItem>, base_path: &Path, entry_path: &Path) {
         let base_name = get_file_name(entry_path);
+        if self.is_reserved_entry(entry_path) {
+            return;
+        }
         if let Ok(Some(item)) = self.to_pathitem(entry_path, base_path).await {
             if is_hidden(&self.args.hidden, base_name, item.is_dir()) {
                 return;
@@ -1564,6 +1725,7 @@ pub struct IndexData {
     pub allow_archive: bool,
     pub dir_exists: bool,
     pub auth: bool,
+    pub oidc: bool,
     pub user: Option<String>,
     pub paths: Vec<PathItem>,
 }
@@ -1691,6 +1853,7 @@ struct EditData {
     allow_upload: bool,
     allow_delete: bool,
     auth: bool,
+    oidc: bool,
     user: Option<String>,
     editable: bool,
 }
@@ -1760,6 +1923,7 @@ async fn zip_dir<W: AsyncWrite + Unpin>(
     compression: Compression,
     follow_symlinks: bool,
     serve_path: PathBuf,
+    reserve_oidc: bool,
     running: Arc<AtomicBool>,
 ) -> Result<()> {
     let hidden = Arc::new(hidden.to_vec());
@@ -1770,6 +1934,7 @@ async fn zip_dir<W: AsyncWrite + Unpin>(
         hidden,
         follow_symlinks,
         serve_path,
+        reserve_oidc,
         move |x| x.path().symlink_metadata().is_ok() && x.file_type().is_file(),
     ))
     .await?;
@@ -1801,6 +1966,32 @@ fn extract_cache_headers(meta: &Metadata) -> Option<(ETag, LastModified)> {
     let etag = format!(r#""{timestamp}-{size}""#).parse::<ETag>().ok()?;
     let last_modified = LastModified::from(mtime);
     Some((etag, last_modified))
+}
+
+fn redirect(res: &mut Response, location: &str, cookies: &[String]) {
+    *res.status_mut() = StatusCode::FOUND;
+    if let Ok(value) = HeaderValue::from_str(location) {
+        res.headers_mut().insert(LOCATION, value);
+    }
+    for cookie in cookies {
+        if let Ok(value) = HeaderValue::from_str(cookie) {
+            res.headers_mut().append(SET_COOKIE, value);
+        }
+    }
+    res.headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+}
+
+#[cfg(feature = "oidc")]
+fn oidc_error(res: &mut Response, err: OidcError) {
+    match err {
+        OidcError::BadRequest(msg) => status_bad_request(res, &msg),
+        OidcError::Unavailable(msg) => {
+            error!("OIDC provider unavailable: {msg}");
+            *res.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            *res.body_mut() = body_full("Login is temporarily unavailable, try again shortly");
+        }
+    }
 }
 
 fn status_forbid(res: &mut Response) {
@@ -1945,6 +2136,7 @@ async fn collect_dir_entries<F>(
     hidden: Arc<Vec<String>>,
     follow_symlinks: bool,
     serve_path: PathBuf,
+    reserve_oidc: bool,
     include_entry: F,
 ) -> Vec<PathBuf>
 where
@@ -1965,7 +2157,10 @@ where
             let entry_path = entry.path();
             let base_name = get_file_name(entry_path);
             let is_dir = entry.file_type().is_dir();
-            if is_hidden(&hidden, base_name, is_dir) {
+            let reserved = reserve_oidc
+                && base_name == OIDC_ROUTE
+                && entry_path.parent() == Some(serve_path.as_path());
+            if reserved || is_hidden(&hidden, base_name, is_dir) {
                 if is_dir {
                     it.skip_current_dir();
                 }

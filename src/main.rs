@@ -47,6 +47,8 @@ async fn main() -> Result<()> {
         print_completions(*generator, &mut cmd);
         return Ok(());
     }
+    #[cfg(feature = "oidc")]
+    oidc::install_crypto_provider();
     let mut args = Args::parse(matches)?;
     logger::init(args.log_file.clone()).map_err(|e| anyhow!("Failed to init logger, {e}"))?;
     let (new_addrs, print_addrs) = check_addrs(&args)?;
