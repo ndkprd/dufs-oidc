@@ -16,6 +16,7 @@
  * @property {boolean} allow_delete
  * @property {boolean} allow_search
  * @property {boolean} allow_archive
+* @property {boolean} oidc
  * @property {boolean} auth
  * @property {string} user
  * @property {boolean} dir_exists
@@ -546,6 +547,11 @@ async function setupAuth() {
   } else {
     $loginBtn.classList.remove("hidden");
     $loginBtn.addEventListener("click", async () => {
+      if (DATA.oidc) {
+        const back = encodeURIComponent(location.pathname + location.search);
+        location.href = `${DATA.uri_prefix}oidc/login?return=${back}`;
+        return;
+      }
       try {
         await checkAuth("login");
       } catch { }
@@ -809,6 +815,10 @@ async function checkAuth(variant) {
 
 function logout() {
   if (!DATA.auth) return;
+  if (DATA.oidc) {
+    location.href = `${DATA.uri_prefix}oidc/logout`;
+    return;
+  }
   const url = baseUrl();
   const xhr = new XMLHttpRequest();
   xhr.open("LOGOUT", url, true, DATA.user);
