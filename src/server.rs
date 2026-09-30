@@ -188,6 +188,7 @@ impl Server {
             authorization,
             query_params.get("token"),
             is_microsoft_webdav,
+            None,
         );
 
         let (user, access_paths) = match guard {
@@ -1080,7 +1081,7 @@ impl Server {
         let output = self
             .args
             .auth
-            .generate_token(relative_path, &user.unwrap_or_default())?;
+            .generate_token(relative_path, &user.unwrap_or_default(), None)?;
         res.headers_mut()
             .typed_insert(ContentType::from(mime_guess::mime::TEXT_PLAIN_UTF_8));
         res.headers_mut()
@@ -1389,7 +1390,7 @@ impl Server {
         let guard = self
             .args
             .auth
-            .guard(&dest_path, req.method(), authorization, None, false);
+            .guard(&dest_path, req.method(), authorization, None, false, None);
 
         match guard {
             (_, Some(_)) => {}

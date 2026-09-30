@@ -283,6 +283,9 @@ pub struct Args {
     pub hidden: Vec<String>,
     #[serde(deserialize_with = "deserialize_access_control")]
     pub auth: AccessControl,
+    pub oidc: OidcConfig,
+    #[serde(rename = "api_keys", alias = "api-keys")]
+    pub api_keys: Vec<ApiKeyConfig>,
     pub allow_all: bool,
     pub allow_upload: bool,
     pub allow_delete: bool,
@@ -306,6 +309,16 @@ pub struct Args {
 }
 
 impl Args {
+    /// Validate the `oidc` / `api_keys` blocks and merge them into the access control.
+    fn apply_auth_config(&mut self) -> Result<()> {
+        self.oidc.validate()?;
+        self.auth.add_api_keys(&self.api_keys)?;
+        if self.oidc.enabled {
+            self.auth.enable_oidc(&self.oidc)?;
+        }
+        Ok(())
+    }
+
     /// Parse command-line arguments.
     ///
     /// If a parsing error occurred, exit the process and print out informative
@@ -366,6 +379,8 @@ impl Args {
             let rules: Vec<_> = rules.map(|v| v.as_str()).collect();
             args.auth = AccessControl::new(&rules)?;
         }
+
+        args.apply_auth_config()?;
 
         if !args.allow_all {
             args.allow_all = matches.get_flag("allow-all");
@@ -612,6 +627,124 @@ where
     deserializer.deserialize_any(StringOrVec)
 }
 
+/// OpenID Connect login settings. Disabled unless `enabled: true`.
+#[derive(Debug, Clone, Deserialize, SmartDefault, PartialEq)]
+#[serde(default)]
+pub struct OidcConfig {
+    pub enabled: bool,
+    pub issuer: String,
+    #[serde(alias = "client-id")]
+    pub client_id: String,
+    #[serde(alias = "client-secret")]
+    pub client_secret: String,
+    #[serde(alias = "redirect-url")]
+    pub redirect_url: String,
+    #[default(_code = "vec![\"openid\".to_string(), \"profile\".to_string(), \"email\".to_string()]")]
+    pub scopes: Vec<String>,
+    #[serde(alias = "session-secret")]
+    pub session_secret: String,
+    /// Seconds, or a number with an `s|m|h|d` suffix.
+    #[serde(alias = "session-ttl", deserialize_with = "deserialize_ttl")]
+    #[default(28800)]
+    pub session_ttl: u64,
+    #[serde(alias = "user-claim")]
+    #[default("preferred_username".to_string())]
+    pub user_claim: String,
+    pub rules: Vec<OidcRule>,
+    /// Paths for authenticated users that match no rule (`/path:perm`). Empty means no access.
+    #[serde(alias = "default-paths")]
+    pub default_paths: Vec<String>,
+}
+
+/// Grants `paths` to users whose `claim` equals or contains the given value.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct OidcRule {
+    pub claim: String,
+    pub equals: Option<String>,
+    pub contains: Option<String>,
+    pub paths: Vec<String>,
+}
+
+/// A named machine credential, sent as `Basic name:token` or `Bearer token`.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct ApiKeyConfig {
+    pub name: String,
+    #[serde(alias = "key")]
+    pub token: String,
+    pub paths: Vec<String>,
+}
+
+pub const MIN_SESSION_SECRET_LEN: usize = 32;
+
+impl OidcConfig {
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        for (key, value) in [
+            ("issuer", &self.issuer),
+            ("client_id", &self.client_id),
+            ("client_secret", &self.client_secret),
+            ("redirect_url", &self.redirect_url),
+        ] {
+            if value.is_empty() {
+                bail!("oidc.{key} is required when oidc is enabled");
+            }
+        }
+        for (key, url) in [("issuer", &self.issuer), ("redirect_url", &self.redirect_url)] {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                bail!("oidc.{key} must be an http(s) URL");
+            }
+        }
+        if self.session_secret.len() < MIN_SESSION_SECRET_LEN {
+            bail!("oidc.session_secret must be at least {MIN_SESSION_SECRET_LEN} bytes");
+        }
+        for rule in &self.rules {
+            if rule.claim.is_empty() || rule.paths.is_empty() {
+                bail!("oidc.rules entries need `claim` and `paths`");
+            }
+            if rule.equals.is_some() == rule.contains.is_some() {
+                bail!("oidc rule for claim `{}` needs exactly one of `equals` or `contains`", rule.claim);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn deserialize_ttl<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Ttl {
+        Seconds(u64),
+        Text(String),
+    }
+    match Ttl::deserialize(deserializer)? {
+        Ttl::Seconds(v) => Ok(v),
+        Ttl::Text(text) => parse_ttl(&text).map_err(serde::de::Error::custom),
+    }
+}
+
+fn parse_ttl(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let (digits, unit) = match text.char_indices().last() {
+        Some((i, c @ ('s' | 'm' | 'h' | 'd'))) => (&text[..i], c),
+        _ => (text, 's'),
+    };
+    let n: u64 = digits
+        .parse()
+        .with_context(|| format!("Invalid session_ttl `{text}`"))?;
+    let mult = match unit {
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => 1,
+    };
+    Ok(n * mult)
+}
+
 fn deserialize_access_control<'de, D>(deserializer: D) -> Result<AccessControl, D::Error>
 where
     D: Deserializer<'de>,
@@ -737,6 +870,82 @@ hidden: tmp,*.log,*.lock
         assert_eq!(args.hidden, ["tmp", "*.log", "*.lock"]);
         assert_eq!(args.port, 3000);
         assert!(args.allow_upload);
+    }
+
+    fn parse_config(contents: &str) -> Result<Args> {
+        let tmpdir = assert_fs::TempDir::new().unwrap();
+        let config_file = tmpdir.child("config.yaml");
+        config_file.write_str(contents).unwrap();
+        let matches = build_cli()
+            .try_get_matches_from(vec!["", "-c", &config_file.to_string_lossy()])
+            .unwrap();
+        Args::parse(matches)
+    }
+
+    const OIDC_OK: &str = r#"
+oidc:
+  enabled: true
+  issuer: https://sso.example.com/realms/asdp
+  client_id: dufs
+  client_secret: s3cret
+  redirect_url: https://files.example.com/oidc/callback
+  session_secret: 0123456789abcdef0123456789abcdef
+  session_ttl: 2h
+  rules:
+    - claim: groups
+      contains: /devops
+      paths: ['/releases:rw']
+  default_paths: ['/:ro']
+api_keys:
+  - name: ci-bot
+    token: sha256:abc
+    paths: ['/releases:rw']
+  - name: viewer
+    key: plain-token
+    paths: ['/:ro']
+"#;
+
+    #[test]
+    fn test_args_oidc_and_api_keys() {
+        let args = parse_config(OIDC_OK).unwrap();
+        assert!(args.oidc.enabled);
+        assert_eq!(args.oidc.session_ttl, 7200);
+        assert_eq!(args.oidc.user_claim, "preferred_username");
+        assert_eq!(args.oidc.rules[0].contains.as_deref(), Some("/devops"));
+        assert_eq!(args.api_keys.len(), 2);
+        assert_eq!(args.api_keys[1].token, "plain-token");
+    }
+
+    #[test]
+    fn test_args_oidc_disabled_by_default() {
+        let args = parse_config("").unwrap();
+        assert!(!args.oidc.enabled);
+        assert!(args.api_keys.is_empty());
+    }
+
+    #[test]
+    fn test_args_oidc_validation_errors() {
+        let cases = [
+            ("session_secret: 0123456789abcdef0123456789abcdef", "session_secret: short", "at least 32"),
+            ("client_id: dufs", "client_id: ''", "oidc.client_id is required"),
+            ("issuer: https://sso.example.com/realms/asdp", "issuer: sso.example.com", "http(s) URL"),
+            ("contains: /devops", "contains: /devops\n      equals: x", "exactly one"),
+            ("name: viewer", "name: ci-bot", "Duplicate"),
+            ("name: viewer", "name: 'a:b'", "must not contain ':'"),
+            ("key: plain-token\n    paths: ['/:ro']", "key: plain-token\n    paths: []", "needs `paths`"),
+        ];
+        for (from, to, expect) in cases {
+            let err = parse_config(&OIDC_OK.replace(from, to)).unwrap_err();
+            assert!(format!("{err:#}").contains(expect), "{to}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn test_parse_ttl() {
+        assert_eq!(parse_ttl("90").unwrap(), 90);
+        assert_eq!(parse_ttl("15m").unwrap(), 900);
+        assert_eq!(parse_ttl("1d").unwrap(), 86400);
+        assert!(parse_ttl("soon").is_err());
     }
 
     #[test]
