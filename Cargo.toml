@@ -67,7 +67,7 @@ oidc = ["dep:reqwest", "dep:rustls", "dep:jsonwebtoken", "dep:hmac", "dep:rand"]
 
 [dev-dependencies]
 assert_cmd = "2"
-reqwest = { version = "0.13", features = ["blocking", "multipart", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["blocking", "multipart", "rustls", "cookies", "form"], default-features = false }
 assert_fs = "1"
 port_check = "0.3"
 rstest = "0.26.1"
