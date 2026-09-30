@@ -178,11 +178,15 @@ impl AccessControl {
                 bail!("Duplicate api_keys name `{}`", key.name);
             }
             if !key.token.starts_with("sha256:") && !key.token.starts_with("$6$") {
-                log::warn!("api_keys `{}` uses a plain token, prefer `sha256:<hex>`", key.name);
+                log::warn!(
+                    "api_keys `{}` uses a plain token, prefer `sha256:<hex>`",
+                    key.name
+                );
             }
             let paths = self.parse_paths(&key.paths)?;
             let token = key.token.clone();
-            self.api_keys.insert(key.name.clone(), ApiKey { token, paths });
+            self.api_keys
+                .insert(key.name.clone(), ApiKey { token, paths });
         }
         self.close_to_anonymous();
         Ok(())
@@ -193,7 +197,11 @@ impl AccessControl {
         for rule in &config.rules {
             let value = rule.equals.as_ref().or(rule.contains.as_ref());
             let value = value.ok_or_else(|| anyhow!("oidc rule `{}` has no value", rule.claim))?;
-            rules.push((rule.claim.clone(), value.clone(), self.parse_paths(&rule.paths)?));
+            rules.push((
+                rule.claim.clone(),
+                value.clone(),
+                self.parse_paths(&rule.paths)?,
+            ));
         }
         let default_paths = match config.default_paths.is_empty() {
             true => None,
@@ -250,12 +258,19 @@ impl AccessControl {
         if let Some((pass, ap)) = self.users.get(user) {
             return Some((pass, ap));
         }
-        self.api_keys.get(user).map(|k| (k.token.as_str(), &k.paths))
+        self.api_keys
+            .get(user)
+            .map(|k| (k.token.as_str(), &k.paths))
     }
 
     fn find_api_key_by_token(&self, presented: &str) -> Option<(&String, &ApiKey)> {
-        let usable = self.api_keys.iter().filter(|(_, k)| !k.token.starts_with("$6$"));
-        usable.into_iter().find(|(_, k)| token_matches(&k.token, presented))
+        let usable = self
+            .api_keys
+            .iter()
+            .filter(|(_, k)| !k.token.starts_with("$6$"));
+        usable
+            .into_iter()
+            .find(|(_, k)| token_matches(&k.token, presented))
     }
 
     pub fn guard(
@@ -296,9 +311,6 @@ impl AccessControl {
             }
             if let Some(user) = get_auth_user(authorization) {
                 if let Some(key) = self.api_keys.get(&user) {
-                    if method == Method::OPTIONS {
-                        return (Some(user), Some(AccessPaths::new(AccessPerm::ReadOnly)));
-                    }
                     if basic_token_matches(authorization, &user, &key.token) {
                         return (Some(user), key.paths.guard(path, method));
                     }
@@ -336,21 +348,32 @@ impl AccessControl {
         let exp = unix_now().as_millis() as u64 + TOKEN_EXPIRATION;
         let (mut signing_key, who, payload) = match (identity, &self.oidc) {
             (Some(id), Some(oidc)) => {
-                let grants = self.oidc_access(&id.claims).map(|ap| ap.rules()).unwrap_or_default();
+                let grants = self
+                    .oidc_access(&id.claims)
+                    .map(|ap| ap.rules())
+                    .unwrap_or_default();
                 let payload = format!("{}\0{}", id.name, grants.join(","));
                 let who = [&[OIDC_TOKEN_MARK], payload.as_bytes()].concat();
-                (derive_secret_key("oidc", &oidc.session_secret), who, payload)
+                (
+                    derive_secret_key("oidc", &oidc.session_secret),
+                    who,
+                    payload,
+                )
             }
             _ => {
                 let (pass, _) = self
                     .credential(user)
                     .ok_or_else(|| anyhow!("Not found user '{user}'"))?;
-                (derive_secret_key(user, pass), user.as_bytes().to_vec(), String::new())
+                (
+                    derive_secret_key(user, pass),
+                    user.as_bytes().to_vec(),
+                    String::new(),
+                )
             }
         };
         let message = match payload.is_empty() {
             true => format!("{path}:{exp}"),
-            false => format!("{path}:{exp}:{payload}"),
+            false => oidc_token_message(path, exp, &payload),
         };
         let sig = signing_key.sign(message.as_bytes()).to_bytes();
 
@@ -380,13 +403,20 @@ impl AccessControl {
         let sig = Signature::from_bytes(&<[u8; 64]>::try_from(sig_bytes)?);
 
         if user_bytes.first() == Some(&OIDC_TOKEN_MARK) {
-            let oidc = self.oidc.as_ref().ok_or_else(|| anyhow!("OIDC is disabled"))?;
+            let oidc = self
+                .oidc
+                .as_ref()
+                .ok_or_else(|| anyhow!("OIDC is disabled"))?;
             let payload = std::str::from_utf8(&user_bytes[1..])?;
-            let message = format!("{path}:{exp}:{payload}");
+            let message = oidc_token_message(path, exp, payload);
             derive_secret_key("oidc", &oidc.session_secret).verify(message.as_bytes(), &sig)?;
-            let (name, grants) = payload.split_once('\0').ok_or_else(|| anyhow!("Invalid token"))?;
+            let (name, grants) = payload
+                .split_once('\0')
+                .ok_or_else(|| anyhow!("Invalid token"))?;
             let mut paths = AccessPaths::default();
-            paths.merge(grants).ok_or_else(|| anyhow!("Invalid token"))?;
+            paths
+                .merge(grants)
+                .ok_or_else(|| anyhow!("Invalid token"))?;
             return Ok((name.to_string(), paths));
         }
 
@@ -544,7 +574,10 @@ impl AccessPaths {
     fn rules_impl(&self, prefix: &str, out: &mut Vec<String>) {
         if !self.perm.indexonly() {
             let perm = if self.perm.readwrite() { "rw" } else { "ro" };
-            out.push(format!("{}:{perm}", if prefix.is_empty() { "/" } else { prefix }));
+            out.push(format!(
+                "{}:{perm}",
+                if prefix.is_empty() { "/" } else { prefix }
+            ));
         }
         for (name, child) in &self.children {
             child.rules_impl(&format!("{prefix}/{name}"), out);
@@ -641,7 +674,10 @@ fn token_matches(stored: &str, presented: &str) -> bool {
     }
     if let Some(hex_digest) = stored.strip_prefix("sha256:") {
         let digest = hex::encode(Sha256::digest(presented.as_bytes()));
-        return ct_eq(hex_digest.to_ascii_lowercase().as_bytes(), digest.as_bytes());
+        return ct_eq(
+            hex_digest.to_ascii_lowercase().as_bytes(),
+            digest.as_bytes(),
+        );
     }
     ct_eq(stored.as_bytes(), presented.as_bytes())
 }
@@ -764,6 +800,11 @@ pub fn check_auth(
     }
 }
 
+/// Length-prefixed so a `:` in the path or user name cannot shift field boundaries.
+fn oidc_token_message(path: &str, exp: u64, payload: &str) -> String {
+    format!("{}:{path}:{exp}:{payload}", path.len())
+}
+
 fn derive_secret_key(user: &str, pass: &str) -> SigningKey {
     let mut hasher = Sha256::new();
     hasher.update(format!("{user}:{pass}").as_bytes());
@@ -799,7 +840,7 @@ fn validate_nonce(nonce: &[u8]) -> Result<bool> {
     bail!("invalid nonce");
 }
 
-fn is_readonly_method(method: &Method) -> bool {
+pub fn is_readonly_method(method: &Method) -> bool {
     method == Method::GET
         || method == Method::OPTIONS
         || method == Method::HEAD
@@ -1035,7 +1076,12 @@ mod tests {
         acl
     }
 
-    fn guard_with(acl: &AccessControl, method: Method, auth: &HeaderValue, path: &str) -> (Option<String>, bool) {
+    fn guard_with(
+        acl: &AccessControl,
+        method: Method,
+        auth: &HeaderValue,
+        path: &str,
+    ) -> (Option<String>, bool) {
         let (user, ap) = acl.guard(path, &method, Some(auth), None, false, None);
         (user, ap.is_some())
     }
@@ -1043,21 +1089,45 @@ mod tests {
     #[test]
     fn test_api_key_basic() {
         let acl = keyed_acl();
-        assert_eq!(guard_with(&acl, Method::GET, &basic("ci", "plain-token"), "/releases"), (Some("ci".into()), true));
-        assert_eq!(guard_with(&acl, Method::GET, &basic("ci", "nope"), "/releases"), (None, false));
-        assert_eq!(guard_with(&acl, Method::GET, &basic("viewer", "view-token"), "/x"), (Some("viewer".into()), true));
-        assert_eq!(guard_with(&acl, Method::GET, &basic("legacy", "pw"), "/x"), (Some("legacy".into()), true));
+        assert_eq!(
+            guard_with(&acl, Method::GET, &basic("ci", "plain-token"), "/releases"),
+            (Some("ci".into()), true)
+        );
+        assert_eq!(
+            guard_with(&acl, Method::GET, &basic("ci", "nope"), "/releases"),
+            (None, false)
+        );
+        assert_eq!(
+            guard_with(&acl, Method::GET, &basic("viewer", "view-token"), "/x"),
+            (Some("viewer".into()), true)
+        );
+        assert_eq!(
+            guard_with(&acl, Method::GET, &basic("legacy", "pw"), "/x"),
+            (Some("legacy".into()), true)
+        );
     }
 
     #[test]
     fn test_api_key_bearer() {
         let acl = keyed_acl();
-        assert_eq!(guard_with(&acl, Method::GET, &bearer("plain-token"), "/releases"), (Some("ci".into()), true));
-        assert_eq!(guard_with(&acl, Method::GET, &bearer("view-token"), "/any"), (Some("viewer".into()), true));
-        assert_eq!(guard_with(&acl, Method::GET, &bearer("unknown"), "/releases"), (None, false));
+        assert_eq!(
+            guard_with(&acl, Method::GET, &bearer("plain-token"), "/releases"),
+            (Some("ci".into()), true)
+        );
+        assert_eq!(
+            guard_with(&acl, Method::GET, &bearer("view-token"), "/any"),
+            (Some("viewer".into()), true)
+        );
+        assert_eq!(
+            guard_with(&acl, Method::GET, &bearer("unknown"), "/releases"),
+            (None, false)
+        );
         // the sha256 digest itself is not a credential
         let digest = sha256_token("view-token").replace("sha256:", "");
-        assert_eq!(guard_with(&acl, Method::GET, &bearer(&digest), "/any"), (None, false));
+        assert_eq!(
+            guard_with(&acl, Method::GET, &bearer(&digest), "/any"),
+            (None, false)
+        );
     }
 
     #[test]
@@ -1068,7 +1138,10 @@ mod tests {
         assert!(!guard_with(&acl, Method::GET, &ci, "/docs").1);
         let viewer = bearer("view-token");
         assert!(guard_with(&acl, Method::GET, &viewer, "/docs").1);
-        assert_eq!(guard_with(&acl, Method::PUT, &viewer, "/docs"), (Some("viewer".into()), false));
+        assert_eq!(
+            guard_with(&acl, Method::PUT, &viewer, "/docs"),
+            (Some("viewer".into()), false)
+        );
     }
 
     #[test]
@@ -1142,7 +1215,10 @@ mod tests {
         assert!(devops.guard("/docs", &Method::GET).is_none());
 
         let both = acl
-            .oidc_access(&claims(&[("groups", "/devops"), ("realm_access.roles", "reader")]))
+            .oidc_access(&claims(&[
+                ("groups", "/devops"),
+                ("realm_access.roles", "reader"),
+            ]))
             .unwrap();
         assert!(both.guard("/releases/a", &Method::PUT).is_some());
         assert!(both.guard("/docs", &Method::GET).is_some());
@@ -1157,7 +1233,11 @@ mod tests {
     #[test]
     fn test_oidc_no_default_means_no_access() {
         let mut acl = AccessControl::default();
-        acl.enable_oidc(&OidcConfig { enabled: true, ..Default::default() }).unwrap();
+        acl.enable_oidc(&OidcConfig {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
         assert!(acl.oidc_access(&claims(&[])).is_none());
     }
 
@@ -1168,12 +1248,21 @@ mod tests {
             name: "alice".into(),
             claims: claims(&[("groups", "/devops")]),
         };
-        let (user, ap) = acl.guard("/releases", &Method::PUT, None, None, false, Some(&identity));
+        let (user, ap) = acl.guard(
+            "/releases",
+            &Method::PUT,
+            None,
+            None,
+            false,
+            Some(&identity),
+        );
         assert_eq!((user.as_deref(), ap.is_some()), (Some("alice"), true));
         let (_, ap) = acl.guard("/docs", &Method::GET, None, None, false, Some(&identity));
         assert!(ap.is_none());
 
-        let token = acl.generate_token("/releases/a.bin", "alice", Some(&identity)).unwrap();
+        let token = acl
+            .generate_token("/releases/a.bin", "alice", Some(&identity))
+            .unwrap();
         let (user, ap) = acl.verify_token(&token, "/releases/a.bin").unwrap();
         assert_eq!(user, "alice");
         assert!(ap.guard("/releases/a.bin", &Method::GET).is_some());
@@ -1199,5 +1288,22 @@ mod tests {
         let mut acl = AccessControl::new(&["ci:pw@/"]).unwrap();
         let err = acl.add_api_keys(&[key("ci", "t", &["/:ro"])]).unwrap_err();
         assert!(err.to_string().contains("Duplicate"));
+    }
+
+    #[test]
+    fn test_oidc_token_fields_cannot_be_resplit() {
+        let acl = oidc_acl();
+        let identity = OidcIdentity {
+            name: "x:99999999999999:y".into(),
+            claims: claims(&[("groups", "/devops")]),
+        };
+        let token = acl
+            .generate_token("/releases/P", "", Some(&identity))
+            .unwrap();
+        assert!(acl.verify_token(&token, "/releases/P").is_ok());
+        let raw = hex::decode(&token).unwrap();
+        let exp = u64::from_be_bytes(raw[64..72].try_into().unwrap());
+        let shifted = format!("/releases/P:{exp}:x");
+        assert!(acl.verify_token(&token, &shifted).is_err());
     }
 }

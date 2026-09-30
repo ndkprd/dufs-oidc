@@ -159,7 +159,7 @@ impl FromStr for HttpLogger {
     }
 }
 
-fn sanitize_log_value(s: &str) -> String {
+pub fn sanitize_log_value(s: &str) -> String {
     s.chars()
         .flat_map(|c| match c {
             '\\' => vec!['\\', '\\'],

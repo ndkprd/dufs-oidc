@@ -62,10 +62,15 @@ fn location(resp: &Response) -> String {
 
 /// Walk dufs -> Keycloak login form -> dufs callback and return a client holding the session.
 fn log_in(user: &str, password: &str) -> Result<Client, Error> {
-    let client = Client::builder().redirect(Policy::none()).cookie_store(true).build()?;
+    let client = Client::builder()
+        .redirect(Policy::none())
+        .cookie_store(true)
+        .build()?;
     let base = format!("http://localhost:{DUFS_PORT}");
 
-    let resp = client.get(format!("{base}/oidc/login?return=/dir1/")).send()?;
+    let resp = client
+        .get(format!("{base}/oidc/login?return=/dir1/"))
+        .send()?;
     assert_eq!(resp.status(), 302);
     let form_page = client.get(location(&resp)).send()?.text()?;
 
@@ -83,7 +88,9 @@ fn log_in(user: &str, password: &str) -> Result<Client, Error> {
     assert_eq!(resp.status(), 302, "{}", resp.text()?);
     assert_eq!(location(&resp), "/dir1/");
     let cookies: Vec<_> = resp.headers().get_all("set-cookie").iter().collect();
-    assert!(cookies.iter().any(|c| c.to_str().unwrap().starts_with("dufs_session=")));
+    assert!(cookies
+        .iter()
+        .any(|c| c.to_str().unwrap().starts_with("dufs_session=")));
     Ok(client)
 }
 
@@ -100,13 +107,29 @@ fn member_of_group_can_read_and_write(tmpdir: TempDir) -> Result<(), Error> {
     let data: serde_json::Value = serde_json::from_str(&listing.text()?)?;
     assert_eq!(data["user"], "alice");
 
-    let put = client.put(format!("{base}/dir1/from-alice.txt")).body("hi").send()?;
+    let put = client
+        .put(format!("{base}/dir1/from-alice.txt"))
+        .body("hi")
+        .send()?;
     assert_eq!(put.status(), 201);
 
+    // a cross-site page cannot write with the session cookie
+    let forged = client
+        .put(format!("{base}/dir1/csrf.txt"))
+        .header("Origin", "http://evil.example")
+        .body("x")
+        .send()?;
+    assert_eq!(forged.status(), 403);
+
     // download tokens work for OIDC sessions, without the cookie
-    let token = client.get(format!("{base}/dir1/test.txt?tokengen")).send()?.text()?;
+    let token = client
+        .get(format!("{base}/dir1/test.txt?tokengen"))
+        .send()?
+        .text()?;
     let plain = Client::new();
-    let resp = plain.get(format!("{base}/dir1/test.txt?token={token}")).send()?;
+    let resp = plain
+        .get(format!("{base}/dir1/test.txt?token={token}"))
+        .send()?;
     assert_eq!(resp.text()?, "This is dir1/test.txt");
 
     let out = client.get(format!("{base}/oidc/logout")).send()?;
@@ -124,7 +147,17 @@ fn user_without_group_is_forbidden(tmpdir: TempDir) -> Result<(), Error> {
     let client = log_in("bob", "bob")?;
     let base = format!("http://localhost:{DUFS_PORT}");
 
-    assert_eq!(client.get(format!("{base}/dir1/?json")).send()?.status(), 403);
-    assert_eq!(client.put(format!("{base}/dir1/x.txt")).body("x").send()?.status(), 403);
+    assert_eq!(
+        client.get(format!("{base}/dir1/?json")).send()?.status(),
+        403
+    );
+    assert_eq!(
+        client
+            .put(format!("{base}/dir1/x.txt"))
+            .body("x")
+            .send()?
+            .status(),
+        403
+    );
     Ok(())
 }

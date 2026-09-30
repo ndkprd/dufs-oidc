@@ -9,7 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::RwLock;
+use std::sync::{Mutex as StdMutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::OnceCell;
 
@@ -91,6 +91,8 @@ pub struct OidcClient {
     secure: bool,
     discovery: OnceCell<Discovery>,
     jwks: RwLock<Option<JwkSet>>,
+    /// `state` values already redeemed at the callback, with their expiry.
+    used_states: StdMutex<HashMap<String, u64>>,
 }
 
 impl OidcClient {
@@ -114,6 +116,7 @@ impl OidcClient {
             secure: cfg.redirect_url.starts_with("https://"),
             discovery: OnceCell::new(),
             jwks: RwLock::new(None),
+            used_states: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -141,7 +144,7 @@ impl OidcClient {
         let sep = if endpoint.contains('?') { '&' } else { '?' };
         Ok(LoginRedirect {
             location: format!("{endpoint}{sep}{query}"),
-            set_cookie: self.cookie(TX_COOKIE, &seal(&self.secret, &tx), TX_TTL),
+            set_cookie: self.cookie(TX_COOKIE, &seal(&self.secret, TX_COOKIE, &tx), TX_TTL),
         })
     }
 
@@ -151,7 +154,7 @@ impl OidcClient {
         cookie_header: Option<&str>,
     ) -> Result<CallbackOutcome, OidcError> {
         let tx: Transaction = cookie_value(cookie_header, TX_COOKIE)
-            .and_then(|v| open(&self.secret, v))
+            .and_then(|v| open(&self.secret, TX_COOKIE, v))
             .filter(|tx: &Transaction| tx.exp > now())
             .ok_or_else(|| bad("login transaction is missing or expired"))?;
         if query.contains_key("error") {
@@ -161,6 +164,7 @@ impl OidcClient {
             return Err(bad("state mismatch"));
         }
         let code = query.get("code").ok_or_else(|| bad("missing code"))?;
+        self.redeem_once(&tx.state, tx.exp)?;
 
         let id_token = self.exchange_code(code, &tx.verifier).await?;
         let claims = self.validate_id_token(&id_token, &tx.nonce).await?;
@@ -174,8 +178,22 @@ impl OidcClient {
         })
     }
 
+    /// A login transaction may reach the token endpoint only once.
+    fn redeem_once(&self, state: &str, exp: u64) -> Result<(), OidcError> {
+        let mut used = self.used_states.lock().unwrap_or_else(|e| e.into_inner());
+        used.retain(|_, expires| *expires > now());
+        if used.insert(state.to_string(), exp).is_some() {
+            return Err(bad("login already used, start again"));
+        }
+        Ok(())
+    }
+
     pub fn identity(&self, cookie_header: Option<&str>) -> Option<OidcIdentity> {
-        let session: Session = open(&self.secret, cookie_value(cookie_header, SESSION_COOKIE)?)?;
+        let session: Session = open(
+            &self.secret,
+            SESSION_COOKIE,
+            cookie_value(cookie_header, SESSION_COOKIE)?,
+        )?;
         (session.exp > now()).then_some(OidcIdentity {
             name: session.name,
             claims: session.claims,
@@ -279,6 +297,8 @@ impl OidcClient {
         validation.set_issuer(&[self.issuer.as_str()]);
         validation.set_audience(&[self.client_id.as_str()]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
+        validation.validate_nbf = true;
+        validation.leeway = 5;
 
         let key = match self.find_key(header.kid.as_deref()) {
             Some(key) => key,
@@ -309,7 +329,7 @@ impl OidcClient {
     }
 
     fn sealed_session(&self, session: &Session) -> Result<String, OidcError> {
-        let value = seal(&self.secret, session);
+        let value = seal(&self.secret, SESSION_COOKIE, session);
         if value.len() > MAX_COOKIE_VALUE {
             return Err(bad("session cookie would be too large"));
         }
@@ -371,9 +391,11 @@ fn mac(secret: &[u8]) -> HmacSha256 {
     HmacSha256::new_from_slice(secret).expect("hmac accepts any key length")
 }
 
-fn seal<T: Serialize>(secret: &[u8], value: &T) -> String {
+fn seal<T: Serialize>(secret: &[u8], purpose: &str, value: &T) -> String {
     let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).unwrap_or_default());
     let mut mac = mac(secret);
+    mac.update(purpose.as_bytes());
+    mac.update(b"\0");
     mac.update(payload.as_bytes());
     format!(
         "{payload}.{}",
@@ -381,10 +403,12 @@ fn seal<T: Serialize>(secret: &[u8], value: &T) -> String {
     )
 }
 
-fn open<T: DeserializeOwned>(secret: &[u8], value: &str) -> Option<T> {
+fn open<T: DeserializeOwned>(secret: &[u8], purpose: &str, value: &str) -> Option<T> {
     let (payload, signature) = value.split_once('.')?;
     let signature = URL_SAFE_NO_PAD.decode(signature).ok()?;
     let mut mac = mac(secret);
+    mac.update(purpose.as_bytes());
+    mac.update(b"\0");
     mac.update(payload.as_bytes());
     mac.verify_slice(&signature).ok()?;
     serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()
@@ -492,7 +516,10 @@ A0OSFnZLaqMaEuysprKm3Qq5IhIvfnRIKUVfgSK2v33+1O5ZhYJ3JA==
             claims: BTreeMap::from([("groups".to_string(), vec!["dev".to_string()])]),
             exp: now() + 60,
         };
-        let header = format!("a=b; {SESSION_COOKIE}={}; c=d", seal(&c.secret, &session));
+        let header = format!(
+            "a=b; {SESSION_COOKIE}={}; c=d",
+            seal(&c.secret, SESSION_COOKIE, &session)
+        );
         let id = c.identity(Some(&header)).unwrap();
         assert_eq!(id.name, "alice");
         assert_eq!(id.claims["groups"], vec!["dev"]);
@@ -507,10 +534,11 @@ A0OSFnZLaqMaEuysprKm3Qq5IhIvfnRIKUVfgSK2v33+1O5ZhYJ3JA==
             claims: BTreeMap::new(),
             exp,
         };
-        let value = seal(&c.secret, &mk(now() + 60));
+        let value = seal(&c.secret, SESSION_COOKIE, &mk(now() + 60));
         let (payload, sig) = value.split_once('.').unwrap();
         let forged = seal(
             &c.secret,
+            SESSION_COOKIE,
             &Session {
                 name: "root".into(),
                 ..mk(now() + 60)
@@ -522,8 +550,14 @@ A0OSFnZLaqMaEuysprKm3Qq5IhIvfnRIKUVfgSK2v33+1O5ZhYJ3JA==
             format!("{payload}.{}A", sig),
             format!("{payload}."),
             payload.to_string(),
-            seal(b"another-secret-another-secret-xxxx", &mk(now() + 60)),
-            seal(&c.secret, &mk(now() - 1)),
+            seal(
+                b"another-secret-another-secret-xxxx",
+                SESSION_COOKIE,
+                &mk(now() + 60),
+            ),
+            seal(&c.secret, SESSION_COOKIE, &mk(now() - 1)),
+            // same key, other purpose: a login-transaction MAC is not a session
+            seal(&c.secret, TX_COOKIE, &mk(now() + 60)),
         ] {
             let header = format!("{SESSION_COOKIE}={bad_value}");
             assert!(c.identity(Some(&header)).is_none(), "{bad_value}");

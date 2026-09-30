@@ -639,7 +639,9 @@ pub struct OidcConfig {
     pub client_secret: String,
     #[serde(alias = "redirect-url")]
     pub redirect_url: String,
-    #[default(_code = "vec![\"openid\".to_string(), \"profile\".to_string(), \"email\".to_string()]")]
+    #[default(
+        _code = "vec![\"openid\".to_string(), \"profile\".to_string(), \"email\".to_string()]"
+    )]
     pub scopes: Vec<String>,
     #[serde(alias = "session-secret")]
     pub session_secret: String,
@@ -691,7 +693,10 @@ impl OidcConfig {
                 bail!("oidc.{key} is required when oidc is enabled");
             }
         }
-        for (key, url) in [("issuer", &self.issuer), ("redirect_url", &self.redirect_url)] {
+        for (key, url) in [
+            ("issuer", &self.issuer),
+            ("redirect_url", &self.redirect_url),
+        ] {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 bail!("oidc.{key} must be an http(s) URL");
             }
@@ -704,7 +709,10 @@ impl OidcConfig {
                 bail!("oidc.rules entries need `claim` and `paths`");
             }
             if rule.equals.is_some() == rule.contains.is_some() {
-                bail!("oidc rule for claim `{}` needs exactly one of `equals` or `contains`", rule.claim);
+                bail!(
+                    "oidc rule for claim `{}` needs exactly one of `equals` or `contains`",
+                    rule.claim
+                );
             }
         }
         Ok(())
@@ -926,13 +934,33 @@ api_keys:
     #[test]
     fn test_args_oidc_validation_errors() {
         let cases = [
-            ("session_secret: 0123456789abcdef0123456789abcdef", "session_secret: short", "at least 32"),
-            ("client_id: dufs", "client_id: ''", "oidc.client_id is required"),
-            ("issuer: https://sso.example.com/realms/asdp", "issuer: sso.example.com", "http(s) URL"),
-            ("contains: /devops", "contains: /devops\n      equals: x", "exactly one"),
+            (
+                "session_secret: 0123456789abcdef0123456789abcdef",
+                "session_secret: short",
+                "at least 32",
+            ),
+            (
+                "client_id: dufs",
+                "client_id: ''",
+                "oidc.client_id is required",
+            ),
+            (
+                "issuer: https://sso.example.com/realms/asdp",
+                "issuer: sso.example.com",
+                "http(s) URL",
+            ),
+            (
+                "contains: /devops",
+                "contains: /devops\n      equals: x",
+                "exactly one",
+            ),
             ("name: viewer", "name: ci-bot", "Duplicate"),
             ("name: viewer", "name: 'a:b'", "must not contain ':'"),
-            ("key: plain-token\n    paths: ['/:ro']", "key: plain-token\n    paths: []", "needs `paths`"),
+            (
+                "key: plain-token\n    paths: ['/:ro']",
+                "key: plain-token\n    paths: []",
+                "needs `paths`",
+            ),
         ];
         for (from, to, expect) in cases {
             let err = parse_config(&OIDC_OK.replace(from, to)).unwrap_err();

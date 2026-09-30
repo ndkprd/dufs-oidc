@@ -1,10 +1,11 @@
 #![allow(clippy::too_many_arguments)]
 
-use crate::auth::{www_authenticate, AccessPaths, AccessPerm, OidcIdentity};
-#[cfg(feature = "oidc")]
-use crate::oidc::{OidcClient, OidcError};
+use crate::auth::{is_readonly_method, www_authenticate, AccessPaths, AccessPerm, OidcIdentity};
+use crate::http_logger::sanitize_log_value;
 use crate::http_utils::{body_full, IncomingStream, LengthLimitedStream};
 use crate::noscript::{detect_noscript, generate_noscript_html};
+#[cfg(feature = "oidc")]
+use crate::oidc::{OidcClient, OidcError};
 use crate::utils::{decode_uri, encode_uri, get_file_name, glob, parse_range, try_get_file_name};
 use crate::Args;
 
@@ -25,7 +26,7 @@ use hyper::{
     body::Incoming,
     header::{
         HeaderValue, ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH,
-        CONTENT_RANGE, CONTENT_TYPE, COOKIE, LOCATION, RANGE, SET_COOKIE,
+        CONTENT_RANGE, CONTENT_TYPE, COOKIE, HOST, LOCATION, ORIGIN, RANGE, SET_COOKIE,
     },
     Method, StatusCode, Uri,
 };
@@ -139,7 +140,7 @@ impl Server {
             Ok(res) => {
                 http_log_data.insert("status".to_string(), res.status().as_u16().to_string());
                 if let Some(LogUser(user)) = res.extensions().get::<LogUser>() {
-                    http_log_data.insert("remote_user".to_string(), user.clone());
+                    http_log_data.insert("remote_user".to_string(), sanitize_log_value(user));
                 }
                 if !uri.path().starts_with(assets_prefix) {
                     self.args.http_logger.log(&http_log_data, None);
@@ -215,6 +216,10 @@ impl Server {
             .collect();
 
         let identity = self.oidc_identity(headers);
+        if identity.is_some() && is_cross_site_write(&method, headers) {
+            status_forbid(&mut res);
+            return Ok(res);
+        }
         let guard = self.args.auth.guard(
             &relative_path,
             &method,
@@ -1123,10 +1128,10 @@ impl Server {
         identity: Option<&OidcIdentity>,
         res: &mut Response,
     ) -> Result<()> {
-        let output = self
-            .args
-            .auth
-            .generate_token(relative_path, &user.unwrap_or_default(), identity)?;
+        let output =
+            self.args
+                .auth
+                .generate_token(relative_path, &user.unwrap_or_default(), identity)?;
         res.headers_mut()
             .typed_insert(ContentType::from(mime_guess::mime::TEXT_PLAIN_UTF_8));
         res.headers_mut()
@@ -1399,17 +1404,20 @@ impl Server {
         if !self.args.auth.oidc_enabled() {
             return None;
         }
-        match relative_path.strip_prefix(OIDC_ROUTE) {
-            Some("") => Some(""),
-            Some(rest) => rest.strip_prefix('/'),
-            None => None,
+        let (head, rest) = relative_path.split_at_checked(OIDC_ROUTE.len())?;
+        if !head.eq_ignore_ascii_case(OIDC_ROUTE) {
+            return None;
+        }
+        match rest {
+            "" => Some(""),
+            _ => rest.strip_prefix('/'),
         }
     }
 
     fn is_reserved_entry(&self, entry_path: &Path) -> bool {
         self.args.auth.oidc_enabled()
             && entry_path.parent() == Some(self.args.serve_path.as_path())
-            && get_file_name(entry_path) == OIDC_ROUTE
+            && get_file_name(entry_path).eq_ignore_ascii_case(OIDC_ROUTE)
     }
 
     fn oidc_identity(&self, headers: &HeaderMap<HeaderValue>) -> Option<OidcIdentity> {
@@ -1968,6 +1976,21 @@ fn extract_cache_headers(meta: &Metadata) -> Option<(ETag, LastModified)> {
     Some((etag, last_modified))
 }
 
+/// A write authenticated only by the session cookie must come from this site (CSRF).
+fn is_cross_site_write(method: &Method, headers: &HeaderMap<HeaderValue>) -> bool {
+    if is_readonly_method(method) {
+        return false;
+    }
+    let text = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(site) = text("sec-fetch-site") {
+        return !matches!(site, "same-origin" | "none");
+    }
+    match text(ORIGIN.as_str()) {
+        Some(origin) => origin.split_once("://").map(|(_, host)| host) != text(HOST.as_str()),
+        None => false,
+    }
+}
+
 fn redirect(res: &mut Response, location: &str, cookies: &[String]) {
     *res.status_mut() = StatusCode::FOUND;
     if let Ok(value) = HeaderValue::from_str(location) {
@@ -2158,7 +2181,7 @@ where
             let base_name = get_file_name(entry_path);
             let is_dir = entry.file_type().is_dir();
             let reserved = reserve_oidc
-                && base_name == OIDC_ROUTE
+                && base_name.eq_ignore_ascii_case(OIDC_ROUTE)
                 && entry_path.parent() == Some(serve_path.as_path());
             if reserved || is_hidden(&hidden, base_name, is_dir) {
                 if is_dir {
@@ -2189,4 +2212,46 @@ where
         }
     }
     paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap<HeaderValue> {
+        let mut map = HeaderMap::new();
+        for (k, v) in pairs {
+            map.insert(
+                hyper::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        map
+    }
+
+    #[test]
+    fn test_cross_site_write() {
+        let host = ("host", "files.example.com");
+        assert!(!is_cross_site_write(
+            &Method::GET,
+            &headers(&[("origin", "http://evil")])
+        ));
+        assert!(!is_cross_site_write(&Method::PUT, &headers(&[host])));
+        assert!(!is_cross_site_write(
+            &Method::PUT,
+            &headers(&[host, ("origin", "https://files.example.com")])
+        ));
+        assert!(is_cross_site_write(
+            &Method::PUT,
+            &headers(&[host, ("origin", "https://evil.example")])
+        ));
+        assert!(is_cross_site_write(
+            &Method::DELETE,
+            &headers(&[("sec-fetch-site", "same-site")])
+        ));
+        assert!(!is_cross_site_write(
+            &Method::DELETE,
+            &headers(&[("sec-fetch-site", "same-origin")])
+        ));
+    }
 }
