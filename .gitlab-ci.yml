@@ -1,0 +1,6 @@
+---
+
+include:
+  - project: endekasoft/ci
+    file: /gitlab-ci/docker.gitlab-ci.yml
+    ref: main

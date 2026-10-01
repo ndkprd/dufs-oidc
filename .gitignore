@@ -6,3 +6,4 @@
 /.agents/
 /.playwright-cli/
 /config.yaml
+/config.yml
