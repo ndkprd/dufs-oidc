@@ -7,3 +7,4 @@
 /.playwright-cli/
 /config.yaml
 /config.yml
+/docker-compose.override.yml
