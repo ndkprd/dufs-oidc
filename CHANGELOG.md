@@ -2,9 +2,7 @@
 
 All notable changes to this fork are documented in this file.
 
-This fork is based on [sigoden/dufs](https://github.com/sigoden/dufs) 0.46.0. Changes up to and including that release are listed in the [upstream changelog](https://github.com/sigoden/dufs/blob/main/CHANGELOG.md).
-
-## [Unreleased]
+## 0.47.0-ndk
 
 ### Features
 
@@ -28,3 +26,7 @@ This fork is based on [sigoden/dufs](https://github.com/sigoden/dufs) 0.46.0. Ch
 
 - Auth stays opt-in. Without `oidc` or `api_keys`, behavior is identical to upstream; `--auth`, Digest, `$6$` hashes and `?token=` keep working.
 - Write access still needs the server flags (`allow-all`, `allow-upload`, ...) in addition to a `:rw` path.
+
+## 0.46.9 and below
+
+This fork is based on [sigoden/dufs](https://github.com/sigoden/dufs) 0.46.0, so everything up to and including that release is upstream work. Those changes are not repeated here; see the [upstream changelog](https://github.com/sigoden/dufs/blob/main/CHANGELOG.md).
