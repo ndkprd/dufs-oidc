@@ -13,7 +13,9 @@ COPY assets ./assets
 RUN cargo build --release --locked
 
 FROM debian:trixie-20260918-slim
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin dufs \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --no-create-home --shell /usr/sbin/nologin dufs \
     && mkdir /data && chown dufs /data
 COPY --from=builder /src/target/release/dufs /usr/local/bin/dufs
 USER dufs
