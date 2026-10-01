@@ -5,3 +5,4 @@
 /internal/
 /.agents/
 /.playwright-cli/
+/config.yaml

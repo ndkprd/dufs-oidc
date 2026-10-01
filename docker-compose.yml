@@ -1,0 +1,17 @@
+# Run dufs-oidc: cp config.example.yaml config.yaml, edit it, then `docker compose up -d --build`.
+# In config.yaml the issuer must be reachable from inside the container (not localhost),
+# and redirect_url must be the URL browsers use, registered in the IdP.
+services:
+  dufs:
+    build: .
+    image: dufs-oidc
+    command: ["--config", "/etc/dufs/config.yaml"]
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./config.yaml:/etc/dufs/config.yaml:ro
+      - dufs-data:/data
+    restart: unless-stopped
+
+volumes:
+  dufs-data:
