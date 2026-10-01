@@ -1,13 +1,10 @@
-# Directories
-/.git/
-/.github/
-/target/
-/examples/
-/docs/
-/benches/
-/tmp/
-
-# Files
-.gitignore
-*.md
-LICENSE*
+.git
+dufs
+target
+internal
+.agents
+.playwright-cli
+dev
+docs
+tests
+ROADMAP.md

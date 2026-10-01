@@ -1,2 +1,7 @@
 /target
 /.vscode
+
+# local-only: internal theme, agent plans, tooling state
+/internal/
+/.agents/
+/.playwright-cli/
