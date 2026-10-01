@@ -440,6 +440,6 @@ dufs is made available under the terms of either the MIT License or the Apache L
 
 See the LICENSE-APACHE and LICENSE-MIT files for license details.
 
-## ASDP fork: OIDC login and api_keys
+## OIDC login and api_keys
 
 This fork adds OpenID Connect login and named `api_keys` (Basic or Bearer). See [docs/oidc-api-keys.md](docs/oidc-api-keys.md) and [config.example.yaml](config.example.yaml).

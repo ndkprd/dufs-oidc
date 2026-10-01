@@ -1,12 +1,12 @@
 ---
 title: OIDC login and API keys
-description: Configure OpenID Connect browser login and named API keys in the ASDP fork of dufs.
+description: Configure OpenID Connect browser login and named API keys in this fork of dufs.
 tags: [dufs, oidc, keycloak, api-keys, authentication]
 ---
 
 # OIDC login and API keys
 
-The ASDP fork adds two opt-in auth mechanisms next to upstream `--auth`:
+This fork adds two opt-in auth mechanisms next to upstream `--auth`:
 
 - `oidc:` lets people sign in through an OpenID Connect provider (Keycloak) in the browser. Permissions come from claims in the ID token.
 - `api_keys:` gives machines named tokens, sent as `Authorization: Basic name:token` or `Bearer token`.
@@ -31,7 +31,7 @@ If none of `--auth`, `oidc.enabled` or `api_keys` is set, dufs behaves as upstre
 | Key              | Default                    | Description                                                                                                                                                      |
 | ---------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`        | `false`                    | Turn OIDC on. Other keys are validated only when `true`.                                                                                                         |
-| `issuer`         | required                   | Issuer URL, for example `http://localhost:8080/realms/asdp`. Discovery is lazy: dufs starts even if the IdP is down; login returns 503 until discovery succeeds. |
+| `issuer`         | required                   | Issuer URL, for example `http://localhost:8080/realms/dufs`. Discovery is lazy: dufs starts even if the IdP is down; login returns 503 until discovery succeeds. |
 | `client_id`      | required                   | Confidential client id.                                                                                                                                          |
 | `client_secret`  | required                   | Client secret. Never logged.                                                                                                                                     |
 | `redirect_url`   | required                   | Full callback URL, ending in `/oidc/callback` (with `--path-prefix`, include the prefix). `https` makes cookies `Secure`.                                        |

@@ -1,4 +1,4 @@
-# Example dufs config for the ASDP fork: OIDC login + api_keys.
+# Example dufs config with OIDC login + api_keys.
 # Run: dufs --config config.example.yaml
 # Replace every CHANGE-ME value. Do not commit real secrets.
 
@@ -14,7 +14,7 @@ auth: []
 oidc:
   enabled: true
   # Issuer URL; /.well-known/openid-configuration is fetched lazily from here.
-  issuer: http://localhost:8080/realms/asdp
+  issuer: http://localhost:8080/realms/dufs
   client_id: dufs
   client_secret: CHANGE-ME-client-secret
   # Must be registered in the IdP exactly as written. https makes the cookie Secure.

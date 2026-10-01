@@ -1,7 +1,7 @@
 //! Full OIDC login against the Keycloak in `dev/keycloak` (see its README).
 //!
 //!     KC_PORT=28080 docker compose -f dev/keycloak/docker-compose.yml up -d
-//!     DUFS_TEST_OIDC_ISSUER=http://localhost:28080/realms/asdp \
+//!     DUFS_TEST_OIDC_ISSUER=http://localhost:28080/realms/dufs \
 //!         cargo test --test oidc_keycloak -- --ignored
 //!
 //! dufs must listen on a redirect URI registered in the realm, hence the fixed port.

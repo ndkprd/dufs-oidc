@@ -893,7 +893,7 @@ hidden: tmp,*.log,*.lock
     const OIDC_OK: &str = r#"
 oidc:
   enabled: true
-  issuer: https://sso.example.com/realms/asdp
+  issuer: https://sso.example.com/realms/dufs
   client_id: dufs
   client_secret: s3cret
   redirect_url: https://files.example.com/oidc/callback
@@ -945,7 +945,7 @@ api_keys:
                 "oidc.client_id is required",
             ),
             (
-                "issuer: https://sso.example.com/realms/asdp",
+                "issuer: https://sso.example.com/realms/dufs",
                 "issuer: sso.example.com",
                 "http(s) URL",
             ),
