@@ -351,6 +351,19 @@ impl OidcClient {
                 }
             }
         }
+        if granted.is_empty() && !self.wanted.is_empty() {
+            let mut seen: Vec<String> = vec![];
+            for (path, _) in &self.wanted {
+                let line = format!("{path}={:?}", claim_values(claims, path));
+                if !seen.contains(&line) {
+                    seen.push(line);
+                }
+            }
+            log::warn!(
+                "OIDC login for `{name}` matched no oidc.rules entry (matching is exact); token has: {}",
+                seen.join(", ")
+            );
+        }
         Ok(Session {
             sub,
             name,
