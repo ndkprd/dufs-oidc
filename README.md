@@ -6,6 +6,17 @@
 
 Dufs is a distinctive utility file server that supports static serving, uploading, searching, accessing control, webdav...
 
+> **dufs-oidc** is a fork of [sigoden/dufs](https://github.com/sigoden/dufs) that adds single sign-on and machine credentials to the auth layer. Everything else is upstream dufs.
+>
+> What it adds (all opt-in; with no `oidc`/`api_keys` config, behavior is identical to upstream):
+>
+> - **OIDC browser login**: authorization code flow with PKCE, ID token validation via the IdP's JWKS, and an `HttpOnly` signed-cookie session. Tested with Keycloak.
+> - **Claim-to-permission rules**: map ID token claims (e.g. `groups`) to dufs `path:perm` access rules, with optional default paths.
+> - **Named `api_keys`**: per-key path permissions for CI and scripts, sent as `curl -u name:token` (Basic) or `Authorization: Bearer <token>`. Tokens can be plain, `sha256:<hex>` or `$6$` hashes.
+> - **Compatible with upstream auth**: `--auth user:pass@/path`, Digest, `$6$` hashes and `?token=` download tokens keep working; the UI Login/Logout buttons use OIDC when enabled.
+>
+> Quick start: `cp config.example.yaml config.yaml`, edit it, then `docker compose up -d --build`. Details in [docs/oidc-api-keys.md](docs/oidc-api-keys.md); a local Keycloak for testing is in [dev/keycloak](dev/keycloak/README.md). Build from source with `cargo build --release` (the `oidc` feature is on by default). The install instructions below are for upstream dufs, which does not include these features.
+
 ![demo](https://user-images.githubusercontent.com/4012553/220513063-ff0f186b-ac54-4682-9af4-47a9781dee0d.png)
 
 ## Features
