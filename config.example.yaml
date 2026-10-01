@@ -6,6 +6,12 @@ serve-path: .
 bind: 0.0.0.0
 port: 5000
 
+# Server-wide switches. api_keys and oidc rules (`rw`) only grant write access
+# where these are enabled: without allow-upload the UI hides Upload / New folder / New file
+# and writes return 403, even for a user with `:rw`. Use allow-all, or pick individually:
+# allow-upload, allow-delete, allow-search, allow-symlink, allow-archive.
+allow-all: true
+
 # Legacy rule list, unchanged from upstream dufs (user:pass@/path:perm).
 # This is NOT the place for api_keys or oidc; those are separate top-level blocks.
 auth: []

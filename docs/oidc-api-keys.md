@@ -24,6 +24,8 @@ If none of `--auth`, `oidc.enabled` or `api_keys` is set, dufs behaves as upstre
 3. Run `dufs --config config.yaml`.
 4. Open `http://localhost:5000`. You are redirected to Keycloak; sign in as `alice` / `alice`.
 
+> **Write access needs two things.** A `:rw` path in `oidc.rules` or `api_keys` grants the permission, but the server must also allow writes: set `allow-all: true` (or `allow-upload`, `allow-delete`, ...) in the config or pass `-A`. Without it the Upload / New folder / New file buttons are hidden and writes return 403 even for `:rw` users.
+
 ## Config reference
 
 ### `oidc`
